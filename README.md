@@ -1,4 +1,4 @@
 # syringe_pump
-syringe pump project
-python file is the interface
+syringe pump project\n
+python file is the interface\n
 keil project/c file is for the stm32
