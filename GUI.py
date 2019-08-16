@@ -2,7 +2,7 @@ import gi
 import serial
 
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, Gio
+from gi.repository import Gtk, Gio, GObject
 
 class MainWindow(Gtk.Window):
 
@@ -10,7 +10,7 @@ class MainWindow(Gtk.Window):
 
     def __init__(self):
         #the serial communication part, where to put ser.close()?
-        self.ser = serial.Serial()
+        self.ser = serial.Serial(timeout=0.5)
         self.ser.baurate = 9600
         self.ser.port = "/dev/ttyACM0"
         print(self.ser)
@@ -82,18 +82,22 @@ class MainWindow(Gtk.Window):
         hbox_top.pack_start(info_box,False,True,0)
 
         #task info label
-        self.info_label = Gtk.Label("Waiting for giving a task...")
-        info_box.pack_start(self.info_label,False,True,0)
+        self.task_label = Gtk.Label("Waiting for giving a task...")
+        info_box.pack_start(self.task_label,False,True,0)
         #info_box.set_center_widget(info_label)
 
         #progress bar
-        pb = Gtk.ProgressBar(fraction=0.5,show_text=True)
-        pb.set_text("Task Progress")
-        info_box.pack_start(pb,False,True,0)
+        self.pb = Gtk.ProgressBar(fraction=0.5,show_text=True)
+        self.pb.set_text("Task Progress")
+        info_box.pack_start(self.pb,False,True,0)
+
+        #position label: would become the volume label later
+        self.pb_label = Gtk.Label("Waiting")
+        info_box.pack_start(self.pb_label, False, True, 0)
 
         #task remain time label
-        time_label = Gtk.Label("Task Remain Time 00:00:00")
-        info_box.pack_start(time_label,False,True,0)
+        self.time_label = Gtk.Label("Task Remain Time 00:00:00")
+        info_box.pack_start(self.time_label,False,True,0)
 
         #top horizontal box boarder
         hbox_border = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
@@ -127,11 +131,9 @@ class MainWindow(Gtk.Window):
             p = [self.control, self.type, self.mode, self.volume_1, self.volume_2, self.speed_1, self.speed_2]
             print(p)
             #update info label
-            self.info_label.set_text("Volume: Speed:")
+            self.task_label.set_text("Volume: Speed:")
             #send command
             self.ser.write(p)
-            #receiving feedback and update the info box, mainly the position reading
-            #self.ser.read()
 
         else:
             print("Please Stop the task first")
@@ -217,6 +219,22 @@ class MainWindow(Gtk.Window):
         self.volume = 0  # target volume, in unit of uL
 
     #need some function to handle the message through the serial
+    def display_pos(self):
+        #  putting our datetime into a var and setting our label to the result.
+        #  we need to return "True" to ensure the timer continues to run, otherwise it will only run once.
+        #  also should update the remain time
+        good = self.ser.read()
+        if good == b'A':
+            num = int(self.ser.read())
+            position = int(self.ser.read(num))
+            pos=str(position)
+            self.pb_label.set_label(pos)
+        return True
+
+    # Initialize Timer
+    def startclocktimer(self):
+        #  this takes 2 args: (how often to update in millisec, the method to run)
+        GObject.timeout_add(1000, self.display_pos)
 
 class ModeDialog(Gtk.Dialog):
 
@@ -350,4 +368,5 @@ class VolumeDialog(Gtk.Dialog):
 win = MainWindow()
 win.connect("destroy", Gtk.main_quit)
 win.show_all()
+win.startclocktimer()
 Gtk.main()
