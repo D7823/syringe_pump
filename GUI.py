@@ -1,6 +1,6 @@
 import gi
 import serial
-
+import time
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gio, GObject
 
@@ -10,7 +10,7 @@ class MainWindow(Gtk.Window):
 
     def __init__(self):
         #the serial communication part, where to put ser.close()?
-        self.ser = serial.Serial(timeout=0.5)
+        self.ser = serial.Serial(timeout=0.1)
         self.ser.baurate = 9600
         self.ser.port = "/dev/ttyACM0"
         print(self.ser)
@@ -18,7 +18,7 @@ class MainWindow(Gtk.Window):
         print(self.ser.is_open)
 
         # setting variables
-        self.control = 0  # 0:stop,1:run
+        self.control = 0  # 0:stop,1:run/continue,2:cancel previous task and run new task
         self.type = 1  # 1:10ml, 2:20ml, 5:50ml...
         self.mode = 0  # 0:infuse only, 1:refill only, 2: refill after infuse
         self.speed = 0  # target speed, in unit of uL/s
@@ -27,6 +27,10 @@ class MainWindow(Gtk.Window):
         self.speed_2 = 0
         self.volume_1 = 0
         self.volume_2 = 0
+        self.total_time = 1.0
+        self.remain_time = 0.0
+        self.finished_volume = 0.0
+        self.dist2vol = 0.36 #for 30mL syringe
 
         Gtk.Window.__init__(self, title="My syringe pump")
         self.set_border_width(10)
@@ -92,11 +96,11 @@ class MainWindow(Gtk.Window):
         info_box.pack_start(self.pb,False,True,0)
 
         #position label: would become the volume label later
-        self.pb_label = Gtk.Label("Waiting")
+        self.pb_label = Gtk.Label("    ")
         info_box.pack_start(self.pb_label, False, True, 0)
 
         #task remain time label
-        self.time_label = Gtk.Label("Task Remain Time 00:00:00")
+        self.time_label = Gtk.Label("Task Remain Time : ")
         info_box.pack_start(self.time_label,False,True,0)
 
         #top horizontal box boarder
@@ -117,6 +121,24 @@ class MainWindow(Gtk.Window):
         stb.connect("clicked", self.on_stop)
         hbox_bottom.pack_end(stb, False, True, 0)
 
+    def prepare_task(self):
+        if self.remain_time>0:
+            #have a pop up to ask continue or restart
+            pre_dialog = PrepareDialog(self)
+            response = pre_dialog.run()
+            if response == Gtk.ResponseType.OK:
+                self.volume = self.volume - self.finished_volume
+            if response == Gtk.ResponseType.CANCEL:
+                self.control = 2
+            pre_dialog.destroy()
+        self.volume_1 = int(self.volume / 250)
+        self.volume_2 = int(self.volume - self.volume_1 * 250)
+        self.speed_1 = int(self.speed / 250)
+        self.speed_2 = int(self.speed - self.speed_1 * 250)
+        self.total_time = self.volume / self.speed
+        self.remain_time = self.total_time
+        #print(self.remain_time)
+
     def on_start(self,widget):
         if self.control== 0:
             #dc_dialog = DoubleCheckDialog(self)
@@ -124,15 +146,17 @@ class MainWindow(Gtk.Window):
             self.control = 1
             print("Start task")
             #command prepare, need a function for it
-            self.volume_1 = int(self.volume/250)
-            self.volume_2 = int(self.volume - self.volume_1*250)
-            self.speed_1 = int(self.speed/250)
-            self.speed_2 = int(self.speed - self.speed_1*250)
+            self.prepare_task()
+            #update info label
+            if self.mode ==0:
+                task_info = "Infuse {} uL at {} uL/s"
+                self.task_label.set_text(task_info.format(self.volume, self.speed))
+            if self.mode ==1:
+                task_info = "Refill {} uL at {} uL/s"
+                self.task_label.set_text(task_info.format(self.volume, self.speed))
+            #send command
             p = [self.control, self.type, self.mode, self.volume_1, self.volume_2, self.speed_1, self.speed_2]
             print(p)
-            #update info label
-            self.task_label.set_text("Volume: Speed:")
-            #send command
             self.ser.write(p)
 
         else:
@@ -145,6 +169,7 @@ class MainWindow(Gtk.Window):
             #send command
             p = [self.control, self.type, self.mode, self.volume_1, self.volume_2, self.speed_1, self.speed_2]
             self.ser.write(p)
+            self.get_finished_volume()
         else:
             print("The task has stopped")
 
@@ -219,22 +244,64 @@ class MainWindow(Gtk.Window):
         self.volume = 0  # target volume, in unit of uL
 
     #need some function to handle the message through the serial
-    def display_pos(self):
+    def get_finished_volume(self):
         #  putting our datetime into a var and setting our label to the result.
         #  we need to return "True" to ensure the timer continues to run, otherwise it will only run once.
-        #  also should update the remain time
+        pfv=0.0
+        while 1:
+            good = self.ser.read()
+            #print(good)
+            #get info about the finished distance in mm
+            if good == b'A':
+                num = int(self.ser.read())
+                dist = int(self.ser.read(num))
+                cfv = int(dist * self.dist2vol * 1000)
+                if pfv == cfv:
+                   self.finished_volume=cfv
+                   self.pb_label.set_text("Have Finished: {}uL".format(self.finished_volume))
+                   print(self.finished_volume)
+                   break
+                pfv=cfv
+             #get info about the motor status, might check abnormal stopping behavior(get stuck?)
+            #elif good == b'B':
+                #self.control = 0
+
+    #just for clear the buffer or we could change the position sending mechanism
+    def clear_buffer(self):
         good = self.ser.read()
+        #print(good)
+        # get info about the finished distance in mm
         if good == b'A':
             num = int(self.ser.read())
-            position = int(self.ser.read(num))
-            pos=str(position)
-            self.pb_label.set_label(pos)
+            dist = int(self.ser.read(num))
+            #self.pb_label.set_text("Have Finished: {}uL".format(dist))
+            #print(dist)
+        return True
+
+    def display_time(self):
+        #  putting our datetime into a var and setting our label to the result.
+        #  we need to return "True" to ensure the timer continues to run, otherwise it will only run once.
+        #  update the remain time and progress bar
+        #  when the time runs out, update the control status to stop for next operation
+        if self.control == 1:
+            if self.remain_time>0:
+                self.time_label.set_text("Task Remain Time: {}s ".format(self.remain_time))
+                self.remain_time=int(self.remain_time-1)
+            else:
+                self.time_label.set_text("Task Remain Time: 0s ")
+                self.control = 0
+                self.get_finished_volume()
+                self.remain_time = 0
+                self.task_label.set_text("Finish Task")
+                self.pb_label.set_text("Finish target volume")
+        self.pb.set_fraction((self.total_time-self.remain_time)/self.total_time)
         return True
 
     # Initialize Timer
     def startclocktimer(self):
         #  this takes 2 args: (how often to update in millisec, the method to run)
-        GObject.timeout_add(1000, self.display_pos)
+        GObject.timeout_add(1000, self.clear_buffer)
+        GObject.timeout_add(1000, self.display_time)
 
 class ModeDialog(Gtk.Dialog):
 
@@ -255,7 +322,7 @@ class ModeDialog(Gtk.Dialog):
         button2.connect("toggled", self.on_button_toggled, 1)
         box.pack_start(button2, False, False, 0)
 
-        button3 = Gtk.RadioButton.new_with_label_from_widget(button1,"Infuse&Refill")
+        button3 = Gtk.RadioButton.new_with_label_from_widget(button1,"Infuse&Refill(not available)")
         button3.connect("toggled", self.on_button_toggled, 2)
         box.pack_start(button3, False, False, 0)
         self.show_all()
@@ -363,6 +430,18 @@ class VolumeDialog(Gtk.Dialog):
     def on_button_toggled(self,button,unit):
         if button.get_active():
             self.selected_unit = unit
+
+class PrepareDialog(Gtk.Dialog):
+    def __init__(self,parent):
+        Gtk.Dialog.__init__(self, "Choose to continue or not", parent, 0,
+                            (Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                             Gtk.STOCK_OK, Gtk.ResponseType.OK))
+
+        self.set_default_size(400, 200)
+        box = self.get_content_area()
+        pro_label = Gtk.Label("Would you like to continue the remain volume from the last task?")
+        box.pack_start(pro_label, False, False, 0)
+        self.show_all()
 
 #run the main window
 win = MainWindow()
