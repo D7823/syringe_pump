@@ -10,7 +10,7 @@
 
 /* Motor Control Expansion Board. */
 XNucleoIHM02A1 *x_nucleo_ihm02a1;
-Serial pc(SERIAL_TX, SERIAL_RX);
+
 /* Initialization parameters of the motors connected to the expansion board. */
 L6470_init_t init[L6470DAISYCHAINSIZE] = {
     /* First Motor. */
@@ -71,6 +71,7 @@ L6470_init_t init[L6470DAISYCHAINSIZE] = {
 };
 
 DigitalOut      led(LED1);
+Serial pc(SERIAL_TX, SERIAL_RX);
 Thread motor_motion;
 Thread serial_receive;
 Thread serial_send;
@@ -85,33 +86,51 @@ typedef struct {
 } mail_t;
 Mail<mail_t,16> mail_box;
 
+void serial_push();
+
+void syringe_reset()
+{
+    L6470 **motors = x_nucleo_ihm02a1->get_components();
+    motors[0]->reset_device();
+    motors[0]->set_home();
+}
+
+
 void syringe_stop()
 {
     L6470 **motors = x_nucleo_ihm02a1->get_components();
     motors[0]->hard_stop();
 }
 
+//just use 30mL syringe's relationship for now
+float select_syringe(int syringe_volume)
+{
+    float dist_vol_ratio;
+    dist_vol_ratio=83/30.0;
+    return dist_vol_ratio;
+}
+
+
 void syringe_go(int control, int type, int mode, int r_volume, int r_speed)
 {
     L6470 **motors = x_nucleo_ihm02a1->get_components();
     if(control==2) {
-        motors[0]->set_home();
-        motors[0]->reset_device();
-        //check_steps=motors[0]->get_position();
+        syringe_reset();
     }
-    //problems on the unit convertion,
-    float volume=r_volume/1000.0; //change to mL
-    float speed=r_speed/1000.0;   //change to mL/s
-    //check_volume=volume;
-    //check_speed=speed;
+    float volume=r_volume/1000.0; //convert to mL
+    float speed=r_speed/1000.0;   //convert to mL/s
     int syringe_volume=type*10; //determine the syringe volume, type*10, in unit of mL
-    float ratio=2.77; //determine the ratio based on type(ratio: ?rev(or ?mm) = 1 mL, here we use the 30mL syringe one)
+    float ratio=select_syringe(syringe_volume); //determine the ratio based on type(ratio: ?rev(or ?mm) = 1 mL, here we use the 30mL syringe one)
     int target_steps=volume*ratio*STEPS;//determine the steps for the motor based on ratio, volume
-    //check_steps=target_steps;
     int max_speed= ratio*200*speed;//determine the moving speed of the syringe
-    //check_max=max_speed;
     motors[0]->prepare_set_max_speed(max_speed);//set the maximum speed to what the user determines
     x_nucleo_ihm02a1->perform_prepared_actions();
+    /*
+    check_volume=volume;
+    check_speed=speed;
+    check_max=max_speed;
+    check_steps=target_steps;
+    */
     //determine the direction based on mode
     if(mode==0) {
         motors[0]->move(StepperMotor::FWD, target_steps);
@@ -133,10 +152,10 @@ void perform_task()
             mail_t *mail = (mail_t*)evt.value.p;
             target_control=mail->control;
             if(target_control==0&&current_status==true) {
-                led=0;//stop the motor
+                led=0;
                 syringe_stop();
                 current_status=false;
-            } else if(target_control==1||target_control==2){
+            } else if(target_control==1||target_control==2) {
                 target_type=mail->type;
                 target_mode=mail->mode;
                 target_volume=mail->volume;//the volum from serial is uL
@@ -144,7 +163,8 @@ void perform_task()
                 led=1;//run the motor
                 current_status=true;
                 syringe_go(target_control,target_type, target_mode, target_volume, target_speed);
-            }
+            } else if(target_control==3)
+                syringe_reset();
             mail_box.free(mail);
         }
     }
@@ -157,38 +177,29 @@ void serial_get()
     mail_t *mail = mail_box.alloc();
     while(1) {
         if(pc.readable()) {
-            for(int i=0; i<7; i++) {
+            for(int i=0; i<7; i++)
                 setting[i]=int(pc.getc());
-                /*faster the stop process
-                if (setting[0]==0)
-                {
-                   mail->control=0;
-                   mail_box.put(mail);
-                   break;
-                }
-                */
-            }        
             if(setting[0]==0) {
                 mail->control=0;
                 mail_box.put(mail);
-            }
-            else if(setting[0]==1) {
+            } else if(setting[0]==1) {
                 mail->control=1;
                 mail->type=setting[1];
                 mail->mode=setting[2];
                 mail->volume=setting[3]*250+setting[4];
                 mail->speed=setting[5]*250+setting[6];
                 mail_box.put(mail);
-            }
-            else if(setting[0]==2)
-            {
-                mail->control=1;
+            } else if(setting[0]==2) {
+                mail->control=2;
                 mail->type=setting[1];
                 mail->mode=setting[2];
                 mail->volume=setting[3]*250+setting[4];
                 mail->speed=setting[5]*250+setting[6];
                 mail_box.put(mail);
-            }         
+            } else if(setting[0]==3) {
+                mail->control=3;
+                mail_box.put(mail);
+            }
         }
     }
 }
@@ -196,29 +207,35 @@ void serial_get()
 /*get the number of digits, use log in the future*/
 int num(int x)
 {
-    if(x/100>0)
+    //27000
+    if(x/100000>0)
+        return 6;
+    else if(x/10000>0)
+        return 5;
+    else if(x/1000>0)
+        return 4;
+    else if(x/100>0)
         return 3;
     else if(x/10>0)
         return 2;
     else
         return 1;
-
 }
 
 /*push position data and syringe status back to the GUI*/
 void serial_push()
 {
     int position;
-    int distance;// in mm
+    int distance;// in um
     int pre_distance;
     int size;
     char *buf;
     char size_c[2];
+    L6470 **motors = x_nucleo_ihm02a1->get_components();
     while(1) {
-        L6470 **motors = x_nucleo_ihm02a1->get_components();
         position=motors[0]->get_position();
         //printf("The position is %d \r\n.", position);
-        distance=int(position/(200*128));
+        distance=int(1000*position/(200*128));
         if(distance<0)
             distance = -distance;
         size=num(distance);
@@ -230,7 +247,8 @@ void serial_push()
         pc.putc(size_c[0]);//sending the number of the size
         for(int i=0; i<size; i++)
             pc.putc(buf[i]);
-        free(buf);
+        delete(buf);
+        //free(buf);
         wait(1.0);
     }
 }
@@ -242,21 +260,18 @@ int main()
 
     DevSPI dev_spi(D11, D12, D3);
     x_nucleo_ihm02a1 = new XNucleoIHM02A1(&init[0], &init[1], A4, A5, D4, A2, &dev_spi);
-    L6470 **motors = x_nucleo_ihm02a1->get_components();
 
-    motors[0]->set_home();
-    motors[0]->reset_device();
-
+    syringe_reset();
     wait(1.0);
     motor_motion.start(&perform_task);
     serial_receive.start(&serial_get);
-    serial_send.start(&serial_push);
+    serial_send.start(&serial_push);//might start and terminate this thread at our needs
     /*
     while(1)
     {
         //printf("volume: %f mL \r\n.",check_volume);
         //printf("speed: %f mL/s \r\n.",check_speed);
-        printf("target steps: %d  \r\n.",check_steps);
+        //printf("target steps: %d  \r\n.",check_steps);
         //printf("max: %d steps/s \r\n.",check_max);
         wait(1.0);
         }
